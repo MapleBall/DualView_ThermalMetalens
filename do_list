@@ -1,0 +1,348 @@
+確認check_thermal_gesture_class 大概ok
+開始進入model test
+
+model change 把 全連接層最後一層N(label)x1 那裏分成兩層，並像平均處理輸出label
+
+from PIL import Image
+
+img = Image.open(r'ThermalHand\ThermalGesture\1708.bmp')
+transform = DualViewCrop(crop_size=(194, 194), offset=(0, 0), output_channel_last=True)
+tensor = transform(img)
+
+print(tensor.shape)  # 應該是 [2, 194, 194]
+
+
+# import torch.nn as nn
+
+# class DualViewCNN(nn.Module):
+#     def __init__(self, num_classes):
+#         super(DualViewCNN, self).__init__()
+#         # 雙視野特徵提取分支（共享權重）
+#         self.branch = nn.Sequential(
+#             nn.Conv2d(1, 32, kernel_size=5, padding=2),
+#             nn.ReLU(inplace=True),
+#             nn.MaxPool2d(2, 2),  # 194x194 → 97x97
+            
+#             nn.Conv2d(32, 64, kernel_size=5, padding=2),
+#             nn.ReLU(inplace=True),
+#             nn.MaxPool2d(2, 2),  # 97x97 → 48x48
+            
+#             nn.Conv2d(64, 128, kernel_size=5, padding=2),
+#             nn.ReLU(inplace=True),
+#             nn.MaxPool2d(2, 2)   # 48x48 → 24x24
+#         )
+        
+#         # 特徵合併與分類器
+#         self.classifier = nn.Sequential(
+#             nn.Flatten(),
+#             nn.Linear(2 * 128 * 24 * 24, 128),  # 雙視野特徵合併
+#             nn.ReLU(inplace=True),
+#             nn.Linear(128, num_classes)
+#         )
+
+#     def forward(self, x):
+#         # 分割左右視野 (batch_size, 2, 194, 194)
+#         left = x[:, 0:1, :, :]  # 左視野 (batch, 1, 194, 194)
+#         right = x[:, 1:2, :, :] # 右視野 (batch, 1, 194, 194)
+        
+#         # 特徵提取
+#         left_feat = self.branch(left)  # (batch, 128*24*24)
+#         right_feat = self.branch(right)
+        
+#         # 特徵合併
+#         combined = torch.cat([left_feat, right_feat], dim=1)
+#         return self.classifier(combined)
+
+
+
+
+# version 2
+
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, random_split
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.metrics import confusion_matrix, classification_report
+import seaborn as sns
+
+# 假設標籤列表 (根據您的數據集可能需要調整)
+labels = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen"]
+
+# 創建標籤到整數的映射和整數到標籤的映射
+label_to_int = {label: i for i, label in enumerate(labels)}
+int_to_label = {i: label for i, label in enumerate(labels)}
+
+class DualCNN(nn.Module):
+    def __init__(self, num_classes=13):
+        super(DualCNN, self).__init__()
+        
+        # 共享的CNN層
+        self.cnn = nn.Sequential(
+            nn.Conv2d(1, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Dropout(0.25),
+            
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Dropout(0.25),
+            
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Dropout(0.25),
+            
+            nn.Flatten()
+        )
+        
+        # 計算CNN輸出的特徵數量（假設輸入為194x194）
+        self.feature_size = self._get_conv_output((1, 194, 194))
+        
+        # 全連接層
+        self.fc1 = nn.Sequential(
+            nn.Linear(self.feature_size, 256),
+            nn.ReLU(),
+            nn.Dropout(0.5)
+        )
+        
+        self.fc2 = nn.Sequential(
+            nn.Linear(512, 128),  # 512 = 256 * 2 (兩個分支合併)
+            nn.ReLU(),
+            nn.Dropout(0.5)
+        )
+        
+        self.fc3 = nn.Linear(128, num_classes)
+        self.softmax = nn.Softmax(dim=1)
+        
+    def _get_conv_output(self, shape):
+        batch_size = 1
+        input = torch.autograd.Variable(torch.rand(batch_size, *shape))
+        output_feat = self.cnn(input)
+        n_size = output_feat.data.view(batch_size, -1).size(1)
+        return n_size
+        
+    def forward(self, x):
+        # 分離左右視野
+        x1 = x[:, 0:1, :, :]  # 左視野 (B, 1, H, W)
+        x2 = x[:, 1:2, :, :]  # 右視野 (B, 1, H, W)
+        
+        # 處理兩個輸入
+        out1 = self.cnn(x1)
+        out2 = self.cnn(x2)
+        
+        # 第一個全連接層
+        out1 = self.fc1(out1)
+        out2 = self.fc1(out2)
+        
+        # 合併兩個分支
+        merged = torch.cat((out1, out2), dim=1)
+        
+        # 第二個全連接層
+        out = self.fc2(merged)
+        
+        # 輸出層
+        logits = self.fc3(out)
+        return logits
+    
+    def predict_proba(self, x):
+        logits = self.forward(x)
+        return self.softmax(logits)
+
+def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs=20, device='cuda', patience=5):
+    model.to(device)
+    
+    # 初始化早停參數
+    best_val_loss = float('inf')
+    patience_counter = 0
+    best_model_state = None
+    
+    # 記錄訓練過程
+    train_losses = []
+    val_losses = []
+    val_accs = []
+    
+    for epoch in range(num_epochs):
+        # 訓練階段
+        model.train()
+        train_loss = 0.0
+        for batch_idx, (data, targets) in enumerate(train_loader):
+            data, targets = data.to(device), targets.to(device)
+            
+            optimizer.zero_grad()
+            outputs = model(data)
+            loss = criterion(outputs, targets)
+            loss.backward()
+            optimizer.step()
+            
+            train_loss += loss.item()
+        
+        avg_train_loss = train_loss / len(train_loader)
+        train_losses.append(avg_train_loss)
+        
+        # 驗證階段
+        model.eval()
+        val_loss = 0.0
+        correct = 0
+        total = 0
+        with torch.no_grad():
+            for data, targets in val_loader:
+                data, targets = data.to(device), targets.to(device)
+                outputs = model(data)
+                loss = criterion(outputs, targets)
+                val_loss += loss.item()
+                _, predicted = outputs.max(1)
+                total += targets.size(0)
+                correct += predicted.eq(targets).sum().item()
+        
+        avg_val_loss = val_loss / len(val_loader)
+        val_losses.append(avg_val_loss)
+        
+        val_acc = 100. * correct / total
+        val_accs.append(val_acc)
+        
+        print(f'Epoch {epoch+1}/{num_epochs}, Train Loss: {avg_train_loss:.4f}, '
+              f'Val Loss: {avg_val_loss:.4f}, Val Acc: {val_acc:.2f}%')
+        
+        # 早停檢查
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            best_model_state = model.state_dict().copy()
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print(f'Early stopping at epoch {epoch+1}')
+                break
+    
+    # 恢復最佳模型
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+    
+    # 繪製訓練曲線
+    plt.figure(figsize=(12, 4))
+    
+    plt.subplot(1, 2, 1)
+    plt.plot(train_losses, label='Train Loss')
+    plt.plot(val_losses, label='Validation Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    
+    plt.subplot(1, 2, 2)
+    plt.plot(val_accs, label='Validation Accuracy')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy (%)')
+    plt.legend()
+    
+    plt.tight_layout()
+    plt.savefig('training_curves.png')
+    plt.show()
+    
+    return model, {'train_losses': train_losses, 'val_losses': val_losses, 'val_accs': val_accs}
+
+def evaluate_model(model, test_loader, device='cuda'):
+    model.eval()
+    all_predictions = []
+    all_targets = []
+    all_probs = []
+    
+    with torch.no_grad():
+        for data, targets in test_loader:
+            data, targets = data.to(device), targets.to(device)
+            outputs = model(data)
+            probs = torch.nn.functional.softmax(outputs, dim=1)
+            _, predicted = outputs.max(1)
+            
+            all_predictions.extend(predicted.cpu().numpy())
+            all_targets.extend(targets.cpu().numpy())
+            all_probs.extend(probs.cpu().numpy())
+    
+    # 計算混淆矩陣
+    cm = confusion_matrix(all_targets, all_predictions)
+    
+    # 繪製混淆矩陣
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=labels, yticklabels=labels)
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.title('Confusion Matrix')
+    plt.tight_layout()
+    plt.savefig('confusion_matrix.png')
+    plt.show()
+    
+    # 輸出分類報告
+    report = classification_report(all_targets, all_predictions, target_names=labels)
+    print("Classification Report:")
+    print(report)
+    
+    # 計算準確率
+    accuracy = (np.array(all_predictions) == np.array(all_targets)).mean()
+    print(f"Test Accuracy: {accuracy * 100:.2f}%")
+    
+    # 將預測的索引轉換為標籤
+    predicted_labels = [int_to_label[idx] for idx in all_predictions]
+    return predicted_labels, np.array(all_probs), accuracy
+
+def main():
+    # 設置隨機種子以確保可重複性
+    torch.cuda.manual_seed(42)
+    np.random.seed(42)
+    
+    # 檢查是否有可用的GPU
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+    
+    # 使用您已有的數據集
+    dataset = ThermalGesture(
+        img_folder=r'ThermalHand\ThermalGesture',
+        label_csv=r'ThermalHand\label.csv',
+        img_transform=img_transform
+    )
+    
+    # 隨機分割數據集為訓練集和驗證集
+    train_size = int(0.8 * len(dataset))
+    val_size = len(dataset) - train_size
+    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+    
+    print(f"Total samples: {len(dataset)}")
+    print(f"Training samples: {len(train_dataset)}")
+    print(f"Validation samples: {len(val_dataset)}")
+    
+    # 創建數據加載器
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=32)
+    
+    # 初始化模型
+    model = DualCNN(num_classes=len(labels))
+    print(model)
+    
+    # 定義損失函數和優化器
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    
+    # 訓練模型
+    model, history = train_model(
+        model, 
+        train_loader, 
+        val_loader, 
+        criterion, 
+        optimizer,
+        num_epochs=50,
+        device=device,
+        patience=10
+    )
+    
+    # 評估模型
+    print("\nEvaluating model on validation set:")
+    predicted_labels, predicted_probs, accuracy = evaluate_model(model, val_loader, device)
+    
+    # 保存模型
+    torch.save(model.state_dict(), 'thermal_gesture_model.pth')
+    print("Model saved to thermal_gesture_model.pth")
+
+if __name__ == "__main__":
+    main()
