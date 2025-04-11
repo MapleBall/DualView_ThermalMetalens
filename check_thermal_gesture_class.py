@@ -172,21 +172,44 @@ from torch.utils.data import DataLoader, random_split
 import torch.nn as nn
 import torch.optim as optim
 
+# 設定隨機種子以便重現結果
+import torch
+import numpy as np
+import random
+
+# 設定隨機種子
+def set_seed(seed):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+set_seed(42)  # 可以改成你想用的數字
+
+# worker_init_fn：讓每個 DataLoader worker 也使用相同 seed
+def worker_init_fn(worker_id):
+    worker_seed = 42 + worker_id
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
 # 設定參數
 batch_size = 16
 learning_rate = 0.0001
-num_epochs = 200
-validation_split = 0.28
+num_epochs = 100
+validation_split = 0.2
 
 # 隨機拆分數據集為訓練集和驗證集
 dataset_size = len(dataset)
 val_size = int(dataset_size * validation_split)
 train_size = dataset_size - val_size
-train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+train_dataset, val_dataset = random_split(dataset, [train_size, val_size],
+                                          generator=torch.Generator().manual_seed(42))  #
 
-# 定義數據加載器
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+# 定義加載器並加 seed 控制
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, worker_init_fn=worker_init_fn)
+val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, worker_init_fn=worker_init_fn)
 
 # 定義模型
 num_classes = dataset.labels_df.shape[1] - 1  # 假設標籤的列數減去圖像編號列
@@ -207,7 +230,7 @@ train_losses = []
 train_accuracies = []
 val_losses = []
 val_accuracies = []
-
+best_val_loss = float('inf')
 for epoch in range(num_epochs):
     # 訓練階段
     model.train()
@@ -261,7 +284,7 @@ for epoch in range(num_epochs):
     print(f"Validation Loss: {val_loss/len(val_loader):.4f}, Validation Accuracy: {val_accuracy:.2f}%")
 
 # 儲存最後一個 Epoch 的模型
-torch.save(model.state_dict(), "last_epoch_model.pth")
+torch.save(model.state_dict(), "last_epoch_model_epoch_100_batchsize_16.pth")
 print("模型已儲存為 'last_epoch_model.pth'")
 
 # 繪製 Loss 和 Accuracy 圖表
