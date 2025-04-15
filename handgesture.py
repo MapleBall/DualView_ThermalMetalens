@@ -14,6 +14,7 @@ import torch
 import torchvision.transforms.functional as TF
 from torchvision import transforms
 from PIL import Image
+from torch.utils.data import Dataset
 
 class DualViewCrop(object):
     def __init__(self, crop_size, offset):
@@ -95,48 +96,44 @@ import numpy as np
 from torch.utils.data import random_split
 # 定義 PyTorch 模型
 class GestureClassifier(nn.Module):
-    def __init__(self, num_classes, input_channels=2):  # 因為我們有兩個視野堆疊在一起
+    def __init__(self, num_classes, input_channels=2):  # 2個視野通道
         super(GestureClassifier, self).__init__()
-        
-        # 第一個卷積層塊
+
+        # 卷積層塊 1
         self.conv1 = nn.Conv2d(input_channels, 32, kernel_size=5, padding=2)
         self.pool1 = nn.MaxPool2d(kernel_size=2, padding=0)
         
-        # 第二個卷積層塊
+        # 卷積層塊 2
         self.conv2 = nn.Conv2d(32, 64, kernel_size=5, padding=2)
         self.pool2 = nn.MaxPool2d(kernel_size=2, padding=0)
         
-        # 第三個卷積層塊
+        # 卷積層塊 3
         self.conv3 = nn.Conv2d(64, 128, kernel_size=5, padding=2)
         self.pool3 = nn.MaxPool2d(kernel_size=2, padding=0)
+
+        # 加入 dropout 防止 overfitting
+        self.dropout = nn.Dropout(p=0.5)
         
-        # 計算全連接層的輸入尺寸
-        # 假設輸入是 (batch_size, 2, 128, 128)
-        # 經過三次池化後變為 (batch_size, 128, 16, 16)
+        # 假設輸入為 (B, 2, 128, 128) -> (B, 128, 16, 16)
         self.fc1 = nn.Linear(128 * 16 * 16, 128)
         self.fc2 = nn.Linear(128, num_classes)
-    
+
     def forward(self, x):
-        # 卷積層塊 1
         x = F.relu(self.conv1(x))
         x = self.pool1(x)
         
-        # 卷積層塊 2
         x = F.relu(self.conv2(x))
         x = self.pool2(x)
         
-        # 卷積層塊 3
         x = F.relu(self.conv3(x))
         x = self.pool3(x)
-        
-        # 展平
+
         x = x.view(x.size(0), -1)
-        
-        # 全連接層
+        x = self.dropout(x)  # Dropout 加在展平後
         x = F.relu(self.fc1(x))
         x = self.fc2(x)
-        
-        return F.softmax(x, dim=1)
+
+        return x  
 
 # 訓練函數
 def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs=10, device='cuda'):
@@ -218,8 +215,8 @@ def main():
     
     # 創建完整數據集
     full_dataset = ThermalGesture(
-        folder='ThermalHand\ThermalGesture',
-        label_csv='ThermalHand\label.csv',
+        folder='train_dataset\ThermalGesture',
+        label_csv='train_dataset\label.csv',
         img_transform=img_transform,
         label_transform=label_transform
     )
@@ -250,12 +247,12 @@ def main():
         val_loader=val_loader,
         criterion=criterion,
         optimizer=optimizer,
-        num_epochs=200,
+        num_epochs=30,
         device=device
     )
     
     # 保存最終模型
-    torch.save(model.state_dict(), 'final_model_epoch_200.pth')
+    torch.save(model.state_dict(), 'final_model_epoch_30.pth')
     print('Training completed!')
 
 if __name__ == '__main__':
